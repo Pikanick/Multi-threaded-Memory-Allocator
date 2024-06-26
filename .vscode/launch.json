@@ -1,0 +1,24 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "C/C++ Runner: Debug Session",
+      "type": "cppdbg",
+      "request": "launch",
+      "args": [],
+      "stopAtEntry": false,
+      "externalConsole": true,
+      "cwd": "c:/Users/pikan/Downloads/Memory-Management-with-Custom-Syscall-and-Custom-Shell--main/Memory-Management-with-Custom-Syscall-and-Custom-Shell--main/a3-a3-dream-team-main",
+      "program": "c:/Users/pikan/Downloads/Memory-Management-with-Custom-Syscall-and-Custom-Shell--main/Memory-Management-with-Custom-Syscall-and-Custom-Shell--main/a3-a3-dream-team-main/build/Debug/outDebug",
+      "MIMode": "gdb",
+      "miDebuggerPath": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
+    }
+  ]
+}
