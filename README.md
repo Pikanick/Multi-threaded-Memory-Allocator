@@ -1,5 +1,6 @@
 # Multi-threaded-Memory-Allocator
 This project demonstrates custom memory allocation strategies in C. It includes the implementation of a simple memory allocator, `myalloc`, and a program to test its functionality. The project illustrates how memory allocation can be managed in a constrained environment and visualizes the memory blocks through a series of images. The allocator supports First Fit, Best Fit, and Worst Fit algorithms for memory allocation.
+
 ## Files
 
 - `main.c`: Contains the main function to test the memory allocation functions.
@@ -16,7 +17,6 @@ The provided images illustrate the memory allocation process:
 1. **memory1.png**: Initial state of memory blocks.
 2. **memory2.png**: Intermediate state showing memory after some allocations and deallocations.
 3. **memory3.png**: Final state after merging free blocks.
-
 ## Features
 - Initialization of the memory allocator.
 - Allocation and deallocation interfaces.
@@ -79,6 +79,7 @@ int main() {
 ## Conclusion
 
 This project demonstrates a basic custom memory allocator in C and provides a visual representation of the memory allocation process. It serves as a useful learning tool for understanding memory management at a lower level.
+
 
 ## License
 
