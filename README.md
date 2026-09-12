@@ -32,7 +32,20 @@ To compile and run the project, use the provided Makefile:
 
 ```bash
 make
-./main
+./myalloc
+```
+
+`./myalloc` runs the whole test suite in `main.c` and prints
+`----TEST_RESULT_Success: N/N` at the end. Pass two arguments to run a
+single case: `./myalloc <algorithm> <test>`, where `<algorithm>` is
+0=FIRST_FIT, 1=BEST_FIT, 2=WORST_FIT, and `<test>` is 0=basic space
+allocation, 1=algorithm-specific behavior, 2=compaction, 3=threading.
+
+## Testing
+
+```bash
+./run_tests.sh          # build + run the test suite, fail if any test fails
+./run_tests.sh --all    # also run under ASan+UBSan and ThreadSanitizer
 ```
 
 ## Implementation Details
@@ -56,7 +69,10 @@ The custom allocator uses a simple first-fit strategy to allocate memory blocks.
 ## Usage
 
 1. Include `myalloc.h` in your project.
-2. Use `myalloc` and `myfree` functions to allocate and deallocate memory, respectively.
+2. Call `initialize_allocator()` once with a pool size and a fit
+   algorithm, then use `allocate()`/`deallocate()` against that pool.
+   (The actual function names are `allocate`/`deallocate`, not
+   `myalloc`/`myfree`.)
 
 ## Example
 
@@ -66,15 +82,26 @@ Here is a simple example of how to use the custom memory allocator:
 #include "myalloc.h"
 
 int main() {
-    void *ptr1 = myalloc(100);
-    void *ptr2 = myalloc(50);
-    myfree(ptr1);
-    void *ptr3 = myalloc(25);
-    myfree(ptr2);
-    myfree(ptr3);
+    initialize_allocator(100, FIRST_FIT);
+
+    void *ptr1 = allocate(20);
+    void *ptr2 = allocate(10);
+    deallocate(ptr1);
+    void *ptr3 = allocate(5);
+    deallocate(ptr2);
+    deallocate(ptr3);
+
+    destroy_allocator();
     return 0;
 }
 ```
+
+## Thread safety
+
+`allocate()`/`deallocate()`/`compact_allocation()` hold a single mutex for
+their entire critical section, so concurrent calls from multiple threads
+(see `test_threading()` in `main.c`) don't corrupt the free/used lists.
+Verified with ThreadSanitizer via `./run_tests.sh --tsan`.
 
 ## Conclusion
 
