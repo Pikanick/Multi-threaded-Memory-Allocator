@@ -1,0 +1,3 @@
+*.o
+myalloc
+memory_dump*

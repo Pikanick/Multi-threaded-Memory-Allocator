@@ -1,5 +1,6 @@
 #include "myalloc.h"
 #include <assert.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
@@ -65,113 +66,65 @@ void destroy_allocator()
 {
   free(myalloc.memory);
 
-  // free other dynamic allocated memory to avoid memory leak
+  // Free the linked-list metadata too -- the previous version only freed
+  // the memory pool itself and leaked every LLnode ever allocated for
+  // the free/used lists.
+  LLnode *cur = headfree;
+  while (cur != NULL) {
+    LLnode *next = cur->next;
+    free(cur);
+    cur = next;
+  }
+  headfree = NULL;
+
+  cur = headused;
+  while (cur != NULL) {
+    LLnode *next = cur->next;
+    free(cur);
+    cur = next;
+  }
+  headused = NULL;
 }
 
-// Finds the previous node of the first fit in the free list.
-// Returns NULL if no fit is found or only one node.
-void *find_firstfit_prev(size_t new_size) {
+// These return the fit *node itself* -- not some "previous node"
+// encoding of it. (The previous version returned a "prev" pointer using a
+// convention that could not distinguish "the fit is headfree itself" from
+// "the fit is headfree->next" once the free list had more than one node,
+// which is why e.g. allocate() would sometimes hand back a *different*
+// free block than the one it had just found: find_firstfit_prev returned
+// `headfree` in both cases, and remove_freenode always read that as
+// "the fit is headfree->next" whenever headfree->next was non-NULL.)
+
+LLnode *find_firstfit(size_t new_size) {
   size_t real_new_size = new_size + 8;
-  LLnode *cur_node = headfree;
-  // default return value if only 1 node
-  LLnode *prev_node = headfree;
-  // > 1 node in list
-  if (headfree->next != NULL)
-  {
-    while (cur_node->size < real_new_size && cur_node->next != NULL)
-    {
-      prev_node = cur_node;
-      cur_node = cur_node->next;
+  for (LLnode *cur = headfree; cur != NULL; cur = cur->next) {
+    if (cur->size >= real_new_size) {
+      return cur;
     }
   }
-  // if after traversing, no fit, return NULL
-  if (cur_node->next == NULL && cur_node->size < real_new_size)
-  {
-    return NULL;
-  }
-
-  return prev_node;
+  return NULL;
 }
 
-// Finds the previous node of the best fit in the free list.
-// Returns NULL if no fit is found or only one node.
-void *find_bestfit_prev(size_t new_size) {
+LLnode *find_bestfit(size_t new_size) {
   size_t real_new_size = new_size + 8;
-  LLnode *cur_node = headfree;
-  LLnode *cur_prev = NULL;
   LLnode *best_fit = NULL;
-  // default return value if only 1 node
-  LLnode *best_prev = headfree;
-  if (headfree == NULL){
-    return NULL;
-  }
-   while (cur_node != NULL) // operating on free list to find the smallest block that can accomodate the requested size
-  {
-    // find the smallest free block that can accommodate the requested size
-    // check each memory block and compare the size to the requested size
-        if (cur_node->size >= real_new_size &&
-        (best_fit == NULL || cur_node->size < best_fit->size))
-    {
-      best_fit = cur_node;
-      if(cur_prev != NULL)
-      {
-        best_prev = cur_prev;
-      }
-      
-    }
-    cur_prev = cur_node;
-    cur_node = cur_node->next;
-  }
-
-  // if only 1 node, after 1 iteration,
-  // cur_prev = headfree
-
-  // if after traversing, no fit, return NULL
-  if (cur_node == NULL)
-  {
-    if (cur_prev->size < real_new_size) {
-      return NULL;
+  for (LLnode *cur = headfree; cur != NULL; cur = cur->next) {
+    if (cur->size >= real_new_size && (best_fit == NULL || cur->size < best_fit->size)) {
+      best_fit = cur;
     }
   }
-
-  return best_prev;
+  return best_fit;
 }
 
-void *find_worstfit_prev(size_t new_size) {
+LLnode *find_worstfit(size_t new_size) {
   size_t real_new_size = new_size + 8;
-  LLnode *cur_node = headfree;
-  LLnode *cur_prev = NULL;
   LLnode *worst_fit = NULL;
-  // default return value if only 1 node
-  LLnode *worst_prev = headfree;
-  while (cur_node != NULL) // operating on free list to find the smallest block that can accomodate the requested size
-  {
-    // find the smallest free block that can accommodate the requested size
-    // check each memory block and compare the size to the requested size
-    if (cur_node->size >= real_new_size && (worst_fit == NULL || cur_node->size > worst_fit->size)) // checks it at least fits
-    {
-      worst_fit = cur_node;        
-      worst_prev = cur_prev;
-      
-    }
-    cur_prev = cur_node;
-    cur_node = cur_node->next;
-  }
-
-  if(worst_fit == NULL && cur_node != NULL && cur_node->size >= real_new_size)
-  {
-    worst_fit = cur_node;
-    worst_prev = cur_prev;
-  }
-  // if after traversing, no fit, return NULL
-  if (cur_node == NULL)
-  {
-    if (cur_prev->size < real_new_size) {
-      return NULL;
+  for (LLnode *cur = headfree; cur != NULL; cur = cur->next) {
+    if (cur->size >= real_new_size && (worst_fit == NULL || cur->size > worst_fit->size)) {
+      worst_fit = cur;
     }
   }
-
-  return worst_prev;
+  return worst_fit;
 }
 
 /*
@@ -179,76 +132,66 @@ void *find_worstfit_prev(size_t new_size) {
  * according to the allocation algorithm and
  * makes space for the new node.
  * Returns the memory address of the start of
- * the corresponding block of memory.
+ * the corresponding block of memory, and (via out_consumed_size) how many
+ * bytes -- header included -- were actually taken from the free list for
+ * it (normally new_size + 8, but see MIN_USABLE_FREE_CHUNK below).
  */
-void *remove_freenode(size_t new_size) {
-  void* avail_addr = NULL;
-  LLnode* fit_prev = NULL;
-  LLnode* fit_node = NULL;
+// A free chunk left with less than this many bytes can never itself hold
+// another allocation (it couldn't even fit the 8-byte header), so rather
+// than strand it as permanently-unusable, dead space, we hand the whole
+// block to the current allocation instead of just splitting off exactly
+// what was asked for.
+#define MIN_USABLE_FREE_CHUNK 9
+
+void *remove_freenode(size_t new_size, size_t *out_consumed_size) {
+  LLnode *fit_node = NULL;
   switch (myalloc.aalgorithm)
   {
   case FIRST_FIT:
-    fit_prev = find_firstfit_prev(new_size);
+    fit_node = find_firstfit(new_size);
     break;
   case BEST_FIT: // satisfies the allocation request from the available memory block that at least as large as the requested size and that results in the smallest remainder fragment.
-    fit_prev = find_bestfit_prev(new_size);
+    fit_node = find_bestfit(new_size);
     break;
   case WORST_FIT: // results in the largest remainder fragment
-                  //  find the smallest free block that can accommodate the requested size
-    // check each memory block and compare the size to the requested size
-    fit_prev = find_worstfit_prev(new_size);
+    fit_node = find_worstfit(new_size);
     break;
   }
 
-  // copy out the address of the free block
-  // only 1 node
-  //
-  if (fit_prev == headfree && fit_prev->next == NULL) {
-    fit_node = fit_prev;
-    avail_addr = fit_prev->header_addr;
-  }
-  else if (fit_prev == headfree && fit_prev->next != NULL) {
-    fit_node = fit_prev->next;
-    avail_addr = fit_node->header_addr;
-  }
-  // no fit
-  else if (fit_prev == NULL) {
+  // no fit anywhere in the free list
+  if (fit_node == NULL) {
     return NULL;
   }
-  else {
-    fit_node = fit_prev->next;
-    avail_addr = fit_node->header_addr;
+
+  void *avail_addr = fit_node->header_addr;
+  size_t real_new_size = new_size + 8;
+  size_t leftover = fit_node->size - real_new_size; // guaranteed >= 0: fit_node->size >= real_new_size
+  size_t consumed_size;
+
+  if (leftover < MIN_USABLE_FREE_CHUNK) {
+    // Give the whole block to this allocation instead of leaving an
+    // unusable sliver behind.
+    consumed_size = fit_node->size;
+    if (fit_node == headfree) {
+      headfree = headfree->next;
+    } else {
+      LLnode *prev = headfree;
+      while (prev->next != fit_node) {
+        prev = prev->next;
+      }
+      prev->next = fit_node->next;
+    }
+    free(fit_node);
+  } else {
+    // Split: shrink the free block down to just the leftover.
+    consumed_size = real_new_size;
+    fit_node->header_addr += real_new_size;
+    fit_node->size -= real_new_size;
   }
 
-  // to allocate the memory block in the worst fit block and split the block if necessary
-  // there is a fit
-  if (fit_prev != NULL)
-  {
-    size_t real_new_size = new_size + 8;
-    // Shrink in 2 cases: only headfree, or
-    // requested size < fit_node->size
-
-    // when only 1 node, just returning headfree as prev
-    // even though it's the fit node itself
-    if (fit_prev == headfree && fit_prev->next == NULL) {
-      // shrink from very (right) end of chunk
-      headfree->header_addr += real_new_size;
-      headfree->size -= real_new_size;
-    }
-    else if (fit_node->size > real_new_size)
-    {
-      // shrink from very (left) beginning of chunk
-      fit_node->header_addr += real_new_size;
-      fit_node->size -= real_new_size;
-    }
-    else
-    {
-      // Just remove node
-      fit_prev->next = fit_node->next;
-      free(fit_node);
-    }
+  if (out_consumed_size != NULL) {
+    *out_consumed_size = consumed_size;
   }
-  // return the actual memory address of the free block
   return avail_addr;
 }
 
@@ -258,10 +201,8 @@ LLnode* insert_used_node(void* new_addr, size_t new_size) {
   struct LLnode *cur = headused;
   while (cur != NULL)
   {
-    // if cur is node to insert after
-    // 0 indexed so actually already 1 past
-    //printf("cur->header_addr: %p, new_addr: %p\n", cur->header_addr, new_addr);
-    //printf("*(cur->header_addr): %c, *new_addr: %c\n", *((char*)cur->header_addr), *((char*)new_addr));
+    // if cur is node to insert after (its block ends exactly where the
+    // new block begins)
     if ((cur->header_addr + cur->size) == new_addr)
     {
       // found the node to insert it after
@@ -275,38 +216,58 @@ LLnode* insert_used_node(void* new_addr, size_t new_size) {
     }
     cur = cur->next;
   }
+  // No contiguous predecessor found (e.g. this is the first allocation,
+  // or BEST_FIT/WORST_FIT handed back a block that isn't adjacent to any
+  // existing used block). List order doesn't matter for correctness here
+  // -- only the *free* list needs to stay address-ordered for merging --
+  // so just insert it right after the (size-0) sentinel head.
+  LLnode *new_node = (LLnode *)malloc(sizeof(LLnode));
+  new_node->header_addr = new_addr;
+  new_node->size = new_size + 8;
+  new_node->next = headused->next;
+  headused->next = new_node;
+  return new_node;
 }
 
-void *allocate(int _size) {   
+void *allocate(int _size) {
+  // The linked lists (headfree/headused) are shared, mutable state, so
+  // every function that walks or edits them needs to hold the mutex for
+  // its whole critical section -- not just the read-only statistics
+  // functions, which is all the previous version protected. Without this,
+  // two threads calling allocate()/deallocate() concurrently (see
+  // test_threading() in main.c) can interleave their linked-list edits
+  // and corrupt them.
+  pthread_mutex_lock(&mutex);
+
   if (myalloc.total_free < (_size + 8))
   {
     printf("Error, allocate(): size requested greater than total free space left in entire available memory space.\n");
+    pthread_mutex_unlock(&mutex);
     return NULL;
   }
-  // Find a free chunk
-  void* header_addr = remove_freenode(_size);
+  // Find a free chunk. consumed_size is normally _size + 8, but
+  // remove_freenode may hand over a slightly larger block if splitting
+  // off exactly _size+8 would leave an unusably small sliver behind.
+  size_t consumed_size = 0;
+  void* header_addr = remove_freenode(_size, &consumed_size);
   // if no fit, return NULL
   if (header_addr == NULL) {
+    pthread_mutex_unlock(&mutex);
     return NULL;
   }
   // Grab the chunk and make a used node for it
   // REMEMBER to free the node in deallocate after use
-  LLnode* new_node = insert_used_node(header_addr, _size);
+  LLnode* new_node = insert_used_node(header_addr, consumed_size - 8);
 
   myalloc.total_free -= new_node->size;
   myalloc.total_used += new_node->size;
 
-  // // check if after allocating, less than enough for another single chunk
-  // if (myalloc.total_free < 9) {
-  //   printf("Error, allocate(): size requested greater than total free space left in entire available memory space.\n");
-  //   return NULL;
-  // }
-
   // store a literal int at the start of the memory chunk
   *((unsigned long*)header_addr) = (unsigned long)new_node->size;
 
-  // check real_new_size
-  return new_node->header_addr + 8;
+  void *result = new_node->header_addr + 8;
+  pthread_mutex_unlock(&mutex);
+  return result;
 }
 
 /*
@@ -321,7 +282,6 @@ LLnode* remove_usednode(void* block_addr) {
   // always >= 1 node, size 0 headused
   while (cur != NULL)
   {
-    // 0 indexed so actually already 1 past
     // user access no header
     if (cur->header_addr == (block_addr - 8))
     {
@@ -334,6 +294,9 @@ LLnode* remove_usednode(void* block_addr) {
     prev = prev->next;
     cur = cur->next;
   }
+  // block_addr doesn't match any used block (double free / bad pointer) --
+  // let the caller (deallocate) handle this instead of returning garbage.
+  return NULL;
 }
 
 // Merges any free nodes that are contiguous
@@ -348,12 +311,23 @@ void merge_free_contigs() {
     {
       // merge all the way to the end
       prev->size += cur->size;
-      // remove cur->next from free list
+      // remove cur from the free list...
+      LLnode *to_free = cur;
       prev->next = cur->next;
-      free(cur);
+      cur = cur->next;
+      // ...only *after* we've read everything we need from it. The
+      // previous version freed cur and then still did `prev = cur;
+      // cur = cur->next;`, reading a freed node (use-after-free --
+      // this is what was actually crashing allocate()/deallocate()).
+      free(to_free);
+      // prev stays put: it just absorbed cur's block, so it's still the
+      // right node to compare the *new* cur against on the next iteration.
     }
-    prev = cur;
-    cur = cur->next;
+    else
+    {
+      prev = cur;
+      cur = cur->next;
+    }
   }
 }
 
@@ -362,7 +336,6 @@ void merge_free_contigs() {
 // Calls merge_free_contigs() to merge any contiguous free nodes after the fact.
 void insert_free_node(LLnode* prevly_used_node) {
   void* block_addr = prevly_used_node->header_addr;
-  size_t block_size = prevly_used_node->size;
 
   // special case no free nodes
   if (headfree == NULL)
@@ -388,10 +361,18 @@ void insert_free_node(LLnode* prevly_used_node) {
       cur->next = prevly_used_node;
       break;
     }
-    // there are only nodes after
-    else if (headfree->header_addr >= block_addr) 
+    // the new block's address is before the current head's: it becomes
+    // the new head, with the *old* head as its ->next.
+    else if (headfree->header_addr >= block_addr)
     {
-      prevly_used_node->next = headfree->next;
+      // (The previous version set this to headfree->next, which skipped
+      // the old head entirely -- silently dropping it from the free
+      // list for good, without freeing it either. In this allocator,
+      // headfree's own address moves forward every time its block gets
+      // split from the front, so this branch is very much reachable in
+      // practice -- not just a first-node edge case -- and the dropped
+      // node showed up as a memory leak.)
+      prevly_used_node->next = headfree;
       headfree = prevly_used_node;
       break;
     }
@@ -402,16 +383,20 @@ void insert_free_node(LLnode* prevly_used_node) {
 
 void deallocate(void *_ptr)
 {
+  pthread_mutex_lock(&mutex);
+
   // myalloc.size includes first size header, but total_free doesn't
   if (myalloc.total_free == myalloc.size)
   {
     printf("Error, deallocate(): no space left to deallocate in entire memory space.\n");
+    pthread_mutex_unlock(&mutex);
     return;
   }
   // Find the used node for the chunk
   LLnode* used_node = remove_usednode(_ptr);
-  // if none found, done
+  // if none found, done (double free or invalid pointer)
   if (used_node == NULL) {
+    pthread_mutex_unlock(&mutex);
     return;
   }
   size_t new_size = used_node->size;
@@ -421,149 +406,142 @@ void deallocate(void *_ptr)
 
   myalloc.total_free += new_size;
   myalloc.total_used -= new_size;
+
+  pthread_mutex_unlock(&mutex);
 }
 
 int compact_allocation(void **_before, void **_after)
-{ 
-//   int i=0;
-//   struct LLnode* cur1 = headused;
-//   while (cur1->next != NULL)
-//   {
-//     _before[i] = cur1->header_addr;
-//     cur1 = cur1->next;
-//     i++;
-//   }
-//   cur1 = headused;
-//   struct LLnode* cur2 = headfree;
-//   while (cur2->next != NULL & cur1->next != NULL)
-//   {
-//     _before[i] = cur2->header_addr;
-//     cur1 = cur1->next;
-//     cur2 = cur2->next;
-//     i++;
-//   }
+{
+  // Slide every used chunk down to the front of the pool (in address
+  // order, so a chunk is never overwritten before it's been moved),
+  // leaving one single contiguous free chunk behind -- instead of the
+  // previous version, which ignored the actual allocator state
+  // entirely: it treated *_before/*_after as *input* addresses (they're
+  // uninitialized output arrays), malloc'd unrelated memory, and called
+  // free() on a pointer that was never returned by malloc (undefined
+  // behavior), all while never touching headfree/headused at all.
+  pthread_mutex_lock(&mutex);
 
-  int compacted_size = 0;
-  // Calculate the total size of the allocation
-    size_t allocation_size = (char *)*_after - (char *)*_before;
-
-    // Allocate a new memory block to hold the compacted allocation
-    void *new_allocation = malloc(allocation_size);
-    if (new_allocation == NULL) {
-        // Allocation failed
-        return -1;
-    }
-  
-    // Copy the used memory to the beginning of the new allocation
-    void *current_ptr = *_before;
-    void *new_ptr = new_allocation;
-    while (current_ptr < *_after) {
-        memcpy(new_ptr, current_ptr, sizeof(void *));
-        current_ptr += sizeof(void *);
-        new_ptr += sizeof(void *);
-    }
-
-    // Free the original allocation
-    free(*_before);
-
-    // Update the _before and _after pointers to point to the new allocation
-    *_before = new_allocation;
-    *_after = (char *)new_allocation + allocation_size;
-
+  int count = 0;
+  for (LLnode *cur = headused->next; cur != NULL; cur = cur->next) {
+    count++;
+  }
+  if (count == 0) {
+    pthread_mutex_unlock(&mutex);
     return 0;
-  // compact allocated memory
-  // update _before, _after and compacted_size
+  }
 
-  return compacted_size;
+  LLnode **chunks = (LLnode **)malloc(sizeof(LLnode *) * count);
+  int idx = 0;
+  for (LLnode *cur = headused->next; cur != NULL; cur = cur->next) {
+    chunks[idx++] = cur;
+  }
+  // Insertion sort by address -- count is the number of live allocations,
+  // never large enough for this to matter.
+  for (int i = 1; i < count; i++) {
+    LLnode *key = chunks[i];
+    int j = i - 1;
+    while (j >= 0 && chunks[j]->header_addr > key->header_addr) {
+      chunks[j + 1] = chunks[j];
+      j--;
+    }
+    chunks[j + 1] = key;
+  }
+
+  void *cursor = myalloc.memory;
+  for (int i = 0; i < count; i++) {
+    LLnode *chunk = chunks[i];
+    if (_before != NULL) {
+      _before[i] = chunk->header_addr + 8; // report user pointers, not raw headers
+    }
+    if (chunk->header_addr != cursor) {
+      // memmove (not memcpy): the source and destination chunks can
+      // overlap once several chunks have already been slid down.
+      memmove(cursor, chunk->header_addr, chunk->size);
+      chunk->header_addr = cursor;
+    }
+    if (_after != NULL) {
+      _after[i] = chunk->header_addr + 8;
+    }
+    cursor += chunk->size;
+  }
+  free(chunks);
+
+  // Replace the (now scattered/stale) free list with a single node
+  // covering whatever's left after the packed used chunks.
+  for (LLnode *cur = headfree; cur != NULL; ) {
+    LLnode *next = cur->next;
+    free(cur);
+    cur = next;
+  }
+  headfree = NULL;
+
+  size_t remaining = (char *)myalloc.memory + myalloc.size - (char *)cursor;
+  if (remaining > 0) {
+    headfree = (LLnode *)malloc(sizeof(LLnode));
+    headfree->size = remaining;
+    headfree->header_addr = cursor;
+    headfree->next = NULL;
+  }
+
+  pthread_mutex_unlock(&mutex);
+  return count;
 }
 
 int available_memory()
 {
   pthread_mutex_lock(&mutex);
-  // int available_memory_size = 0;
-  // // Calculate available memory size
-  // available_memory_size = myalloc.size - 8;
-
-  // struct LLnode* cur1 = headfree;
-  // while (cur1 != NULL)
-  // {
-  //   available_memory_size += cur1->size;
-  //   cur1 = cur1->next;
-  // }
+  // total_free counts each free chunk's *raw* size, header included; the
+  // largest single allocation that space could actually satisfy is 8
+  // bytes (one header) less than that. Clamp at 0 rather than going
+  // negative once every last byte is allocated (total_free == 0).
+  int result = myalloc.total_free >= 8 ? myalloc.total_free - 8 : 0;
   pthread_mutex_unlock(&mutex);
-  // return available_memory_size;
-  return myalloc.total_free - 8;
+  return result;
 }
 
 void get_statistics(struct Stats* _stat)
 {
-  
   pthread_mutex_lock(&mutex);
-  // Populate struct Stats with the statistics
-  _stat->allocated_size = 0; // IS THIS WITHOUT NODES OR USED LIST?
-  _stat->allocated_chunks = 0; // used list
+
+  _stat->allocated_size = 0;
+  _stat->allocated_chunks = 0;
   _stat->free_size = 0;
   _stat->free_chunks = 0;
-  _stat->smallest_free_chunk_size = myalloc.size-8;
-  _stat->largest_free_chunk_size = myalloc.size-8;
+  _stat->smallest_free_chunk_size = 0;
+  _stat->largest_free_chunk_size = 0;
 
-  // special case no free nodes
-  if (headfree == NULL)
-  {
-    _stat->free_size = myalloc.total_free-8;
-    _stat->free_chunks = 1;
-  }
+  // Every chunk's raw ->size includes its own 8-byte header; every size
+  // reported here is meant to be the *usable* size (raw - 8), which is
+  // why this needs to happen per chunk rather than once at the end.
 
-  // special case no used nodes
-  if (headused->next == NULL)
-  {
-    _stat->allocated_chunks = 0;
-    _stat->allocated_size=0;
-  }
-
-  struct LLnode* cur1 = headfree;
-  while (cur1 != NULL)
+  // headfree has no dummy node -- if it's non-NULL it's itself a real
+  // free chunk.
+  int min = -1;
+  int max = 0;
+  for (LLnode *cur = headfree; cur != NULL; cur = cur->next)
   {
     _stat->free_chunks += 1;
-    _stat->free_size += cur1->size;
-    cur1 = cur1->next;
+    _stat->free_size += (int)cur->size - 8;
+    if (min < 0 || (int)cur->size < min) {
+      min = (int)cur->size;
+    }
+    if ((int)cur->size > max) {
+      max = (int)cur->size;
+    }
+  }
+  if (min >= 0)
+  {
+    _stat->smallest_free_chunk_size = min - 8;
+    _stat->largest_free_chunk_size = max - 8;
   }
 
-  // first node in used list is dummy (size 0)
-  struct LLnode* cur2 = headused;
-  while (cur2->next != NULL)
+  // headused *is* a dummy size-0 sentinel, so start from ->next.
+  for (LLnode *cur = headused->next; cur != NULL; cur = cur->next)
   {
     _stat->allocated_chunks += 1;
-    _stat->allocated_size += cur2->size;
-    cur2 = cur2->next;
+    _stat->allocated_size += (int)cur->size - 8;
   }
 
-  cur1 = headfree;
-  LLnode* cur_prev = NULL;
-  LLnode* largest_free_chunk_size = NULL;
-  LLnode* smallest_free_chunk_size = NULL;
-  // default return value if only 1 node
-  LLnode* best_prev = headfree;
-  int min = myalloc.size;
-  int max = 0;
-  while (cur1 != NULL)
-  {
-
-    // If min is greater than head->data then
-    // assign value of head->data to min
-    // otherwise node point to next node.
-    if (min > cur1->size)
-    {
-      min = cur1->size;
-    }
-
-    if (max < cur1->size)
-    {
-      max = cur1->size;
-    }
-    cur1 = cur1->next;
-  }
-  _stat->smallest_free_chunk_size = min-8;
-  _stat->largest_free_chunk_size = max-8;
   pthread_mutex_unlock(&mutex);
 }
